@@ -26,7 +26,6 @@
 #include <asm-generic/termbits.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <gpiod.h>
 #include <linux/serial.h>
 #include <linux/sockios.h>
 #include <linux/tty.h>
@@ -52,12 +51,6 @@
 
 /* The length of ttypath buffer */
 #define TTYPATH_LENGTH 256
-
-/* The length of ttypath buffer */
-#define GPIO_CHIP_PATH "/dev/gpiochip0"
-
-/* The length of ttypath buffer */
-#define GPIO_LINE_NAME "STM_RST"
 
 /* UART flow control types */
 #define FLOW_NONE 0
@@ -87,7 +80,6 @@ void print_usage(char * prg)
   fprintf(stderr, "         -c          (send close command 'C\\r')\n");
   fprintf(stderr, "         -f          (read status flags with 'F\\r' to reset error states)\n");
   fprintf(stderr, "         -l          (send listen only command 'L\\r', overrides -o)\n");
-  fprintf(stderr, "         -r          (toggle STM_RST GPIO line)\n");
   fprintf(stderr, "         -s <speed>  (set CAN speed 0..8)\n");
   fprintf(stderr, "         -S <speed>  (set UART speed in baud)\n");
   fprintf(stderr, "         -t <type>   (set UART flow control type 'hw' or 'sw')\n");
@@ -99,83 +91,6 @@ void print_usage(char * prg)
   fprintf(stderr, "h_slcand -o -c -f -s6 ttyUSB0 can0\n\n");
   fprintf(stderr, "h_slcand -o -c -f -s6 /dev/ttyUSB0\n\n");
   exit(EXIT_FAILURE);
-}
-
-int set_lint_val(enum gpiod_line_value value)
-{
-  int ret;
-  int final_ret = -1;
-  struct gpiod_chip * chip;
-  struct gpiod_line_settings * settings;
-  struct gpiod_line_config * line_cfg;
-  struct gpiod_request_config * req_cfg = NULL;
-  struct gpiod_line_request * request;
-
-  chip = gpiod_chip_open(GPIO_CHIP_PATH);
-  if (!chip) {
-    syslogger(LOG_NOTICE, "failed to open GPIO chip '%s'!\n", GPIO_CHIP_PATH);
-    return -1;
-  }
-
-  unsigned int stm_rst_line = gpiod_chip_get_line_offset_from_name(chip, GPIO_LINE_NAME);
-  if (!errno) {
-    settings = gpiod_line_settings_new();
-    if (settings) {
-      gpiod_line_settings_set_direction(settings, GPIOD_LINE_DIRECTION_OUTPUT);
-      gpiod_line_settings_set_output_value(settings, value);
-
-      line_cfg = gpiod_line_config_new();
-      if (line_cfg) {
-        ret = gpiod_line_config_add_line_settings(line_cfg, &stm_rst_line, 1, settings);
-        if (!ret) {
-          req_cfg = gpiod_request_config_new();
-          if (req_cfg) {
-            gpiod_request_config_set_consumer(req_cfg, DAEMON_NAME);
-            request = gpiod_chip_request_lines(chip, req_cfg, line_cfg);
-            if (request) {
-              gpiod_line_request_set_value(request, stm_rst_line, value);
-              gpiod_line_request_release(request);
-            } else {
-              syslogger(
-                LOG_NOTICE, "failed to request line '%s' on a GPIO chip '%s'!\n", GPIO_LINE_NAME,
-                GPIO_CHIP_PATH);
-            }
-          } else {
-            syslogger(LOG_NOTICE, "failed request config!\n");
-          }
-        } else {
-          syslogger(LOG_NOTICE, "failed to add line settings!\n");
-        }
-        gpiod_line_config_free(line_cfg);
-      } else {
-        syslogger(LOG_NOTICE, "failed to allocate new config!\n");
-      }
-      gpiod_line_settings_free(settings);
-    }
-  } else {
-    syslogger(
-      LOG_NOTICE, "failed to find line '%s' on a GPIO chip '%s'!\n", GPIO_LINE_NAME,
-      GPIO_CHIP_PATH);
-  }
-  gpiod_chip_close(chip);
-  return final_ret;
-}
-
-void invoke_stm_reset()
-{
-  if (set_lint_val(GPIOD_LINE_VALUE_ACTIVE) != 0) {
-    exit(EXIT_FAILURE);
-  }
-
-  // sleep 0.5 second
-  usleep(500000);
-
-  if (set_lint_val(GPIOD_LINE_VALUE_INACTIVE) != 0) {
-    exit(EXIT_FAILURE);
-  }
-
-  // sleep 0.5 second for the STM to boot
-  usleep(500000);
 }
 
 static int slcand_running;
@@ -211,7 +126,6 @@ int main(int argc, char * argv[])
   struct termios2 tios_old;
 
   int opt;
-  int reset_stm = 0;
   int send_open = 0;
   int send_close = 0;
   int send_listen = 0;
@@ -228,7 +142,7 @@ int main(int argc, char * argv[])
 
   ttypath[0] = '\0';
 
-  while ((opt = getopt(argc, argv, "ocflrs:S:t:b:?hF")) != -1) {
+  while ((opt = getopt(argc, argv, "ocfls:S:t:b:?hF")) != -1) {
     switch (opt) {
       case 'o':
         send_open = 1;
@@ -241,9 +155,6 @@ int main(int argc, char * argv[])
         break;
       case 'l':
         send_listen = 1;
-        break;
-      case 'r':
-        reset_stm = 1;
         break;
       case 's':
         speed = optarg;
@@ -285,10 +196,6 @@ int main(int argc, char * argv[])
   }
 
   if (!run_as_daemon) syslogger = fake_syslog;
-
-  if (reset_stm) {
-    invoke_stm_reset();
-  }
 
   /* Initialize the logging interface */
   openlog(DAEMON_NAME, LOG_PID, LOG_LOCAL5);
